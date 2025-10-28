@@ -1,5 +1,5 @@
 #!/bin/bash
-# rename_files.sh
+# mediaren.sh
 #
 # Rename files based on metadata:
 #  - Uses exiftool (-G1 -a -s) to extract metadata keys.
@@ -18,18 +18,16 @@
 #       • If no date is available, no date is prefixed.
 #  - Only renames if GPS data is available.
 #
-# Requirements: exiftool, curl
+# Requirements: exiftool, curl, jq
 #
 # Usage:
 #   ./rename_files.sh [--help] [--dryrun] [-f FILE] [-d DIRECTORY]
 #
 # Options:
-#   --help         Show this help message and exit.
-#   --dryrun       Show what would be done, but don't actually rename files.
-#   -f FILE        Process a single file (with path).
-#   -d DIRECTORY   Process all regular files in the specified directory.
-#
-# If neither -f nor -d is provided, the current directory is used.
+#   --help or -h    Show this help message and exit.
+#   --dryrun        Show what would be done, but don't actually rename files.
+#   -f FILE         Process a single file (with path).
+#   -d DIRECTORY    Process all regular files in the specified directory (non-recursive).
 
 version="1.0.0"
 
@@ -39,38 +37,28 @@ print_help() {
   echo "Usage: ${0##*/} [options]"
   echo "Options:"
   echo "  --dryrun         Perform a dry run without renaming files"
+  echo "  --verbose, -v    Display detailed processing information"
   echo "  --help or -h     Display this help message"
   echo "  -f <file>        Rename a single file"
   echo "  -d <directory>   Rename all files in a directory (non-recursive)"
 }
 
-# Function to extract GPS coordinates and earliest date from EXIF metadata
+# Function to extract GPS coordinates and the earliest date from EXIF metadata.
 extract_metadata() {
   local file="$1"
   local gps_lat gps_lon earliest_date
-
-  # Extract GPS coordinates and earliest date
-  gps_lat=$(exiftool -G1 -a -s -n -p '$GPSLatitude' "$file")
-  gps_lon=$(exiftool -G1 -a -s -n -p '$GPSLongitude' "$file")
-  #earliest_date=$(exiftool -G1 -a -s -p '$DateTimeOriginal' "$file" | sort -r | head -1)
-
-  # If DateTimeOriginal is not available, try other date fields
-  #if [ -z "$earliest_date" ]; then
-  #  earliest_date=$(exiftool -G1 -a -s -p '$MediaCreateDate' "$file")
-  #  if [ -z "$earliest_date" ]; then
-  #    earliest_date=$(exiftool -G1 -a -s -p '$CreateDate' "$file")
-  #    if [ -z "$earliest_date" ]; then
-  #      earliest_date=$(exiftool -G1 -a -s -p '$GPSDateTime' "$file")
-  #      if [ -z "$earliest_date" ]; then
-  #        earliest_date=$(exiftool -G1 -a -s -p '$FileModifyDate' "$file")
-  #      fi
-  #    fi
-  #  fi
-  #fi
-
-
-
-  date_fields=('$DateTimeOriginal' '$MediaCreateDate' '$CreateDate' '$GPSDateTime' '$FileModifyDate')
+  local date
+  # Using 
+  # -m tags friendly names.
+  # -s tags shortnames.
+  # -n to output unformatted values.
+  # -p pulls specific tag
+  gps_lat=$(exiftool -m -s -n -p '$GPSLatitude' "$file")
+  gps_lon=$(exiftool -m -s -n -p '$GPSLongitude' "$file")
+  
+  # Date tags to check (quotes here prevent shell expansion; exiftool will interpret them)
+  # local date_fields=('$DateTimeOriginal' '$MediaCreateDate' '$CreateDate' '$GPSDateTime' '$FileModifyDate')
+  local date_fields=('$DateTimeOriginal' '$MediaCreateDate' '$CreateDate' '$GPSDateTime')
   earliest_date=""
 
   for field in "${date_fields[@]}"; do
@@ -82,37 +70,61 @@ extract_metadata() {
     fi
   done
 
-  echo "$gps_lat" "$gps_lon" "$earliest_date"
+  echo "$gps_lat $gps_lon $earliest_date"
 }
 
-# Function to get location from GPS coordinates
+# Function to get location from GPS coordinates.
+# The output is tab-delimited to preserve spaces in field values.
 get_location() {
   local gps_lat="$1"
   local gps_lon="$2"
-
-  # Query ArcGIS geocoding service
-  response=$(curl -s "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/reverseGeocode?location=$gps_lon,$gps_lat&f=pjson&langCode=EN")
-  #response=$(curl -v "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/reverseGeocode?location=$gps_lon,$gps_lat&f=pjson&langCode=EN")
-
-  # Extract street, city, and country
-  street=$(echo "$response" | jq -r '.address.Street // ""')
-  city=$(echo "$response" | jq -r '.address.City')
-  country=$(echo "$response" | jq -r '.address.CountryCode')
-
-  # If country code is available, get full country name
-  if [ -n "$country" ]; then
-    country=$(curl -s "https://restcountries.com/v3.1/alpha/$country" | jq -r '.[0].name.common')
+  local response street matchaddr city countrycode countryname longlabel
+  
+  response=$(curl -s "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/reverseGeocode?location=${gps_lon},${gps_lat}&f=pjson&langCode=EN")
+  
+  # Output the complete response in verbose mode
+  if [ "$verbose" = true ]; then
+    echo "GPS Coordinates: Latitude $gps_lat, Longitude $gps_lon" >&2
+    echo "Complete API Response:" >&2
+    echo "$response" | jq '.' >&2
   fi
+  
+  street=$(echo "$response" | jq -r '.address.Street // ""')
+  matchaddr=$(echo "$response" | jq -r '.address.Match_addr // ""')
+  city=$(echo "$response" | jq -r '.address.City // ""')
+  countrycode=$(echo "$response" | jq -r '.address.CountryCode // ""')
+  countryname=$(echo "$response" | jq -r '.address.CntryName // ""')
+  longlabel=$(echo "$response" | jq -r '.address.LongLabel // ""')
 
-  echo "$street" "$city" "$country"
-  echo "retrieved $street $city $country"
+  if [ "$verbose" = true ]; then
+    echo "get_location street: '$street'" >&2
+    echo "get_location matchaddr: '$matchaddr'" >&2
+    echo "get_location countrycode: '$countrycode'" >&2
+    echo "get_location countryname: '$lcountryname'" >&2
+    echo "get_location longlabel: '$longlabel'" >&2
+  fi
+  
+  # Ensure each field is properly escaped for tab-delimited output
+  # Use printf for more reliable field separation
+
+  # echo -e "${street}\t${matchaddr}\t${city}\t${countrycode}\t${countryname}\t${longlabel}"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\n" "${street}" "${matchaddr}" "${city}" "${countrycode}" "${countryname}" "${longlabel}"
 }
 
-# Main script
+# Main script argument processing
+dryrun=false
+verbose=false
+file=""
+directory=""
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --dryrun)
       dryrun=true
+      shift
+      ;;
+    --verbose|-v)
+      verbose=true
       shift
       ;;
     --help|-h)
@@ -141,68 +153,110 @@ if [ -z "$file" ] && [ -z "$directory" ]; then
   exit 1
 fi
 
-# Main processing
+# Main processing block
+process_one_file() {
+  local file="$1"
+  local gps_lat gps_lon earliest_date
+  local street matchaddr city countrycode countryname longlabel new_filename
 
-if [ -n "$directory" ]; then
-  for file in "$directory"/*; do
-    if [ -f "$file" ]; then
-      # Process each file in the directory
-      # gps_lat gps_lon earliest_date
-      read gps_lat gps_lon earliest_date < <(extract_metadata "$file")
+  if [ "$verbose" = true ]; then
+    echo "Processing file: $file"
+  fi
 
-      if [ -n "$gps_lat" ] && [ -n "$gps_lon" ]; then
-        # street city country
-        read street city country < <(get_location "$gps_lat" "$gps_lon")
-      else
-        street="" city="" country=""
-      fi
-
-      # Format new filename
-      if [[ "$file" =~ ^[0-9]{8}\  ]]; then
-        # File already has date prefix, insert location
-        new_filename="${file%% *} "-" $street $city, $country ${file#* }"
-      else
-        # Add date prefix if not present
-        new_filename=$(date -j -f "%Y:%m:%d %H:%M:%S" "$earliest_date" "+%Y%m%d") -" $street $city, $country $file"
-      fi
-
-      if [ "$dryrun" = true ]; then
-        echo "Would rename: $file to $new_filename"
-      else
-        mv "$file" "$new_filename"
-        echo "Renamed: $file to $new_filename"
-      fi
-    fi
-  done
-
-elif [ -n "$file" ]; then
-  # Process single file
-  # gps_lat gps_lon earliest_date
   read gps_lat gps_lon earliest_date < <(extract_metadata "$file")
 
+
+  if [ "$verbose" = true ]; then
+    echo "Extracted metadata: GPS Lat=$gps_lat, GPS Lon=$gps_lon, Date=$earliest_date, LongLabel=$longlabel"
+  fi
+
+
   if [ -n "$gps_lat" ] && [ -n "$gps_lon" ]; then
-    # street city country
-    read street city country < <(get_location "$gps_lat" "$gps_lon")
+    # Get the location data directly
+    location_data=$(get_location "$gps_lat" "$gps_lon")
+    
+    # For debugging
+    if [ "$verbose" = true ]; then
+      echo "Raw location data: $location_data" >&2
+    fi
+    
+    # Parse the location data directly with tabs preserved
+    street=$(echo "$location_data" | cut -f1)
+    matchaddr=$(echo "$location_data" | cut -f2)
+    city=$(echo "$location_data" | cut -f3)
+    countrycode=$(echo "$location_data" | cut -f4)
+    countryname=$(echo "$location_data" | cut -f5)
+    longlabel=$(echo "$location_data" | cut -f6)
+  
+    if [ "$verbose" = true ]; then
+      echo "Parsed data:" >&2
+      echo "street: '$street'" >&2
+      echo "matchaddr: '$matchaddr'" >&2
+      echo "city: '$city'" >&2
+      echo "countrycode: '$countrycode'" >&2
+      echo "countryname: '$countryname'" >&2
+      echo "longlabel: '$longlabel'" >&2
+    fi
   else
-    street="" city="" country=""
+    street=""; matchaddr=""; city=""; countrycode=""; countryname=""; longlabel=""
+    if [ "$verbose" = true ]; then
+      echo "No GPS coordinates found in file metadata." >&2
+    fi
   fi
 
-echo $gps_lat $gps_lon $earliest_date
-echo $street $city, $country
+  # echo "Retrived: $gps_lat $gps_lon $earliest_date" 
+  # echo "Match Address: $matchaddr"
+  # echo "Long Label: $longlabel"
+  # echo "Ideal Label: ${matchaddr#*, }, $countryname"
 
-  # Format new filename
-  if [[ "$file" =~ ^[0-9]{8}\  ]]; then
-    # File already has date prefix, insert location
-    new_filename="${file%% *} "-" $street $city, $country ${file#* }"
+if [[ -z "$earliest_date" && ( -z "$matchaddr" || "$matchaddr" == *null* ) ]]; then
+  echo "No metadata available for renaming $file."
+  new_filename=""
+else
+  # Sanitize the longlabel for filenames, but preserve commas
+  # Only remove/replace characters that are truly problematic for filenames
+  filename_longlabel=$(echo "$longlabel" | tr -d '"*?<>|' | tr ':' '-' | tr '/' '-' | tr '\n' ' ')
+  
+  if [ "$verbose" = true ]; then
+    echo "Original longlabel: '$longlabel'" >&2
+    echo "Filename longlabel: '$filename_longlabel'" >&2
+  fi
+  
+  # Format new filename. Use existing date prefix if the file's name starts with 8 digits.
+  if [[ "$(basename "$file")" =~ ^[0-9]{8}\  ]]; then
+    new_filename="${file%% *} - ${filename_longlabel} ${file#* }"
   else
-    # Add date prefix if not present
-    new_filename=$(date -j -f "%Y:%m:%d %H:%M:%S" "$earliest_date" "+%Y%m%d") -" $street $city, $country $file"
+    new_filename="$earliest_date - ${filename_longlabel} $file"
   fi
 
+  # Execute
   if [ "$dryrun" = true ]; then
     echo "Would rename: $file to $new_filename"
   else
+    if [ "$verbose" = true ]; then
+      echo "Renaming file:"
+      echo "  From: $file"
+      echo "  To:   $new_filename"
+    fi      
     mv "$file" "$new_filename"
     echo "Renamed: $file to $new_filename"
   fi
 fi
+
+
+}
+
+
+
+if [ -n "$directory" ]; then
+  for file in "$directory"/*; do
+    if [ -f "$file" ]; then
+      #echo "${file#./}"
+      process_one_file "${file#./}"
+    fi
+  done
+elif [ -n "$file" ]; then
+  process_one_file "$file"
+fi
+
+
